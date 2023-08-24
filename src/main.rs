@@ -97,6 +97,8 @@ fn get_boxes(res_x: u16, res_y: u16, x_box_cnt: u16, y_box_cnt: u16, mean_depth:
 fn main() {
     //read_config();
     let boxes = get_boxes(2660, 1440, 7, 5, 100, 500);
+    let leds = get_leds(boxes, 86, 35);
+
     boxes.iter()
         .for_each(|b| {println!("{} {} {} {} {} {} {}", b.section_start, b.section_end, b.mean_x_min, b.mean_y_min, b.mean_x_max, b.mean_y_max, b.side)});
 }
