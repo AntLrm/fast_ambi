@@ -1,7 +1,11 @@
 use std::cmp;
+use std::time;
+use std::slice;
+use std::thread;
 use rand::Rng;
-use screenshots::Screen;
 use image;
+use x11::xlib;
+use std::ptr;
 
 struct Box {
     section_start: u16,
@@ -31,6 +35,101 @@ struct Led {
     g: u16,
     b: u16
 }
+
+
+////////////////////////////////
+
+struct Bgr {
+    b: u8,
+    g: u8,
+    r: u8,
+    _pad: u8,
+}
+
+pub struct Screen {
+    display: *mut xlib::Display,
+    screen: *mut xlib::Screen,
+    window: xlib::Window,
+}
+
+impl Screen {
+    /// Tries to open the X11 display, then returns a handle to the default screen.
+    ///
+    /// Returns `None` if the display could not be opened.
+    pub fn open() -> Option<Screen> {
+        unsafe {
+            let display = xlib::XOpenDisplay(ptr::null());
+            if display.is_null() {
+                return None;
+            }
+            let screen = xlib::XDefaultScreenOfDisplay(display);
+            let root = xlib::XRootWindowOfScreen(screen);
+            Some(Screen {
+                display,
+                screen,
+                window: root,
+            })
+        }
+    }
+    /// Tries to capture a screenshot of the entire screen.
+    ///
+    /// Returns an `RgbImage` on success, `None` on failure.
+    ///
+    /// See the documentation of the `image` crate on how to use `RgbImage`.
+    pub fn capture(&self) -> Option<image::RgbImage> {
+        let screen: &mut xlib::Screen = &mut unsafe { *self.screen };
+        self.capture_area(screen.width as u32, screen.height as u32, 0, 0)
+    }
+
+    pub fn capture_ximage(&self, w: u32, h: u32, x: i32, y: i32) -> *mut xlib::XImage {
+        let img = unsafe { xlib::XGetImage(self.display, self.window, x, y, w, h, !1, xlib::ZPixmap) };
+        return img
+    }
+
+    pub fn capture_area(&self, w: u32, h: u32, x: i32, y: i32) -> Option<image::RgbImage> {
+        let img =
+            unsafe { xlib::XGetImage(self.display, self.window, x, y, w, h, !1, xlib::ZPixmap) };
+
+        if !img.is_null() {
+            let image = unsafe { &mut *img };
+            let sl: &[Bgr] = unsafe {
+                slice::from_raw_parts(
+                    (image).data as *const _,
+                    (image).width as usize * (image).height as usize,
+                )
+            };
+
+            let mut bgr_iter = sl.iter();
+            let mut image_buffer = image::RgbImage::new(w, h);
+
+            for pix in image_buffer.pixels_mut() {
+                let bgr = bgr_iter.next().unwrap();
+                pix.0 = [bgr.r, bgr.g, bgr.b];
+            }
+
+            unsafe {
+                xlib::XDestroyImage(img as *mut _);
+            }
+            Some(image_buffer)
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for Screen {
+    fn drop(&mut self) {
+        unsafe {
+            xlib::XCloseDisplay(self.display);
+        }
+    }
+}
+
+
+
+
+
+//////////////////////////////////////
 
 fn new_box(idx: u16, width: u16, side: u16, mean_radius: u16, mean_depth: u16, res_in_dir: u16, res_ortho: u16) -> Box {
     let section_center: u16 = (idx * width) + width / 2;
@@ -74,7 +173,7 @@ fn new_box(idx: u16, width: u16, side: u16, mean_radius: u16, mean_depth: u16, r
 fn new_led(boxes: &Vec<Box>, led_pos: u16, side: u16) -> Led {
     let (idx, bx) = boxes.iter()
                  .enumerate()
-                 .find(|(i, b)| {b.section_start <= led_pos && b.section_end >= led_pos && b.side == side})
+                 .find(|(_, b)| {b.section_start <= led_pos && b.section_end >= led_pos && b.side == side})
                  .unwrap();
         
     Led {
@@ -147,13 +246,64 @@ fn get_leds(boxes: &Vec<Box>, x_led_count: u16, y_led_count: u16, res_x: u16, re
    return leds
 }
 
-fn color_boxes(boxes: &mut Vec<Box>, screen_capture: image::RgbaImage, sample_count: u16) {
+fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16) {
+    let screen_capture = screen.capture_ximage(2560, 1440, 0, 0);
     boxes.iter_mut()
         .for_each(|b| {
            let mean_color: Vec<u16> = (0..sample_count).collect::<Vec<u16>>()
                                         .iter()
                                         .map(|_| {
-                                            screen_capture.get_pixel(rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max).into(), rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max).into())
+                                            let clr = &mut xlib::XColor {
+                                                pixel: unsafe { xlib::XGetPixel(screen_capture, rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max).into(), rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max).into()) },
+                                                red: 0,
+                                                green: 0,
+                                                blue: 0,
+                                                flags: 0,
+                                                pad: 0
+                                            };
+
+                                            unsafe {xlib::XQueryColor(screen.display, xlib::XDefaultColormap(screen.display, xlib::XDefaultScreen(screen.display)), clr)};
+
+                                            return [clr.red/256, clr.green/256, clr.blue/256]
+
+                                        })
+                                        .map(|c| [c[0] as u16, c[1] as u16, c[2] as u16])
+                                        .fold([0, 0, 0], |[rs, gs, bs], [r,g,b]| [rs+r, gs + g, bs + b])
+                                        .iter()
+                                        .map(|c| c / sample_count)
+                                        .collect();
+            b.set_color(mean_color[0], mean_color[1], mean_color[2]);
+        });
+    unsafe {
+        xlib::XDestroyImage(screen_capture as *mut _);
+    }
+}
+
+fn color_boxes_sub(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16) {
+    boxes.iter_mut()
+        .for_each(|b| {
+           let mean_color: Vec<u16> = (0..sample_count).collect::<Vec<u16>>()
+                                        .iter()
+                                        .map(|_| {
+                                            let px = rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max);
+                                            let py = rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max);
+                                            let screen_capture = screen.capture_ximage(1, 1, px.into(), py.into());
+                                            let clr = &mut xlib::XColor {
+                                                pixel: unsafe { xlib::XGetPixel(screen_capture, 0, 0)},
+                                                red: 0,
+                                                green: 0,
+                                                blue: 0,
+                                                flags: 0,
+                                                pad: 0
+                                            };
+
+                                            unsafe {xlib::XQueryColor(screen.display, xlib::XDefaultColormap(screen.display, xlib::XDefaultScreen(screen.display)), clr)};
+                                            unsafe {
+                                                xlib::XDestroyImage(screen_capture as *mut _);
+                                            }
+
+                                            return [clr.red / 256, clr.green / 256, clr.blue / 256]
+
                                         })
                                         .map(|c| [c[0] as u16, c[1] as u16, c[2] as u16])
                                         .fold([0, 0, 0], |[rs, gs, bs], [r,g,b]| [rs+r, gs + g, bs + b])
@@ -166,9 +316,35 @@ fn color_boxes(boxes: &mut Vec<Box>, screen_capture: image::RgbaImage, sample_co
 
 impl Led{
     fn update_color(&mut self, boxes: &Vec<Box>) {
-        self.r = boxes[usize::from(self.box_idx)].r;
-        self.g = boxes[usize::from(self.box_idx)].g;
-        self.b = boxes[usize::from(self.box_idx)].b;
+        let boxes_last_idx: u16 = boxes.len() as u16 - 1;
+        let current_box = &boxes[usize::from(self.box_idx)];
+        let next_box = match current_box.side {
+            0 | 1 => &boxes[usize::from(self.box_idx) + 1],
+            2 | 3 => &boxes[usize::from(self.box_idx) - 1],
+            _ => &boxes[0]
+        };
+        let previous_box = match current_box.side {
+            0 | 1 => match self.box_idx {
+                        0 => &boxes[usize::from(boxes_last_idx)],
+                        _ => &boxes[usize::from(self.box_idx) + 1]
+                    },
+            2 | 3 => match self.box_idx {
+                        a if a == boxes_last_idx => &boxes[0],
+                        _ => &boxes[usize::from(self.box_idx) - 1]
+                    },
+            _ => &boxes[0]
+        };
+
+        let (b1, b2, relative_unit) = match self.relative_box_position.cmp(&50){
+            cmp::Ordering::Less => (previous_box, current_box, self.relative_box_position * 2),
+            cmp::Ordering::Greater | cmp::Ordering::Equal => (current_box, next_box, (self.relative_box_position - 50) * 2)
+        };
+
+        
+
+        self.r = (relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100;
+        self.g = (relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100;
+        self.b = (relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100;
     }
 }
 
@@ -178,18 +354,23 @@ fn main() {
     let mut boxes = get_boxes(2560, 1440, 20, 20, 80, 80);
     let mut leds = get_leds(&boxes, 86, 35, 2560, 1440);
 
-    while true {
-        println!{"START"}
-        let screens = Screen::all().unwrap();
-        for screen in screens {
-            let image = screen.capture().unwrap();
-            color_boxes(&mut boxes, image, 30);
-            leds.iter_mut()
-                .for_each(|l| l.update_color(&boxes));
-            leds.iter()
-                .for_each(|b| {println!("{} {} {}", b.r, b.g, b.b)});
-        }
+    let screen = Screen::open().unwrap();
+
+    //let mut loop_time =  Vec::new();
+    
+    for _ in 0..200 {
+        //let now = time::SystemTime::now();
+        color_boxes_sub(&mut boxes, &screen, 12);
+        leds.iter_mut()
+            .for_each(|l| l.update_color(&boxes));
+    
+        //loop_time.push(now.elapsed().unwrap().as_millis());
+        leds.iter()
+            .for_each(|b| {println!("{} {} {}", b.r, b.g, b.b)});
+        thread::sleep(time::Duration::from_millis(100));
     }
+    //let loop_time_average: u128 = loop_time.iter().sum::<u128>() / loop_time.len() as u128;
+    //println!("{}", loop_time_average);
     /*
     boxes.iter()
         .for_each(|b| {println!("{} {} {} {} {} {} {}", b.section_start, b.section_end, b.mean_x_min, b.mean_y_min, b.mean_x_max, b.mean_y_max, b.side)});
