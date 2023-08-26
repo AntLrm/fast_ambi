@@ -208,9 +208,7 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16) {
                                             };
 
                                             unsafe {xlib::XQueryColor(screen.display, xlib::XDefaultColormap(screen.display, xlib::XDefaultScreen(screen.display)), clr)};
-                                            unsafe {
-                                                xlib::XDestroyImage(screen_capture as *mut _);
-                                            }
+                                            unsafe {xlib::XDestroyImage(screen_capture as *mut _)};
 
                                             return [clr.red / 256, clr.green / 256, clr.blue / 256]
 
@@ -220,6 +218,7 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16) {
                                         .iter()
                                         .map(|c| c / sample_count)
                                         .collect();
+
             b.set_color(mean_color[0], mean_color[1], mean_color[2]);
         });
 }
@@ -250,8 +249,6 @@ impl Led{
             cmp::Ordering::Greater | cmp::Ordering::Equal => (current_box, next_box, (self.relative_box_position - 50) * 2)
         };
 
-        
-
         self.r = (relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100;
         self.g = (relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100;
         self.b = (relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100;
@@ -260,27 +257,33 @@ impl Led{
 
 
 fn main() {
-    //read_config();
-    let mut boxes = get_boxes(2560, 1440, 20, 20, 80, 80);
-    let mut leds = get_leds(&boxes, 86, 35, 2560, 1440);
+    let x_res = 2560;
+    let y_res = 1440;
+    let x_box_cnt = 9;
+    let y_box_cnt = 5;
+    let mean_radius = 150;
+    let mean_depth = 300;
+    let x_led_count = 86;
+    let y_led_count = 35;
+    let sampling_size = 12;
+    let loop_sleep = 100;
+
+    let mut boxes = get_boxes(x_res, y_res, x_box_cnt, y_box_cnt, mean_depth, mean_radius);
+    let mut leds = get_leds(&boxes, x_led_count, y_led_count, x_res, y_res);
 
     let screen = Screen::open().unwrap();
 
-    //let mut loop_time =  Vec::new();
     
-    for _ in 0..200 {
-        //let now = time::SystemTime::now();
-        color_boxes(&mut boxes, &screen, 12);
+    loop {
+        color_boxes(&mut boxes, &screen, sampling_size);
         leds.iter_mut()
             .for_each(|l| l.update_color(&boxes));
     
-        //loop_time.push(now.elapsed().unwrap().as_millis());
         leds.iter()
             .for_each(|b| {println!("{} {} {}", b.r, b.g, b.b)});
-        thread::sleep(time::Duration::from_millis(100));
+
+        thread::sleep(time::Duration::from_millis(loop_sleep));
     }
-    //let loop_time_average: u128 = loop_time.iter().sum::<u128>() / loop_time.len() as u128;
-    //println!("{}", loop_time_average);
     /*
     boxes.iter()
         .for_each(|b| {println!("{} {} {} {} {} {} {}", b.section_start, b.section_end, b.mean_x_min, b.mean_y_min, b.mean_x_max, b.mean_y_max, b.side)});
