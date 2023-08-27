@@ -4,11 +4,13 @@ use std::ptr;
 use std::thread;
 use std::time;
 use x11::xlib;
+use std::io::Write;
 
 struct Box {
     section_start: u16,
     section_end: u16,
     side: u16, //0 top, 1 right, 2 bottom, 3 left
+    sample_points : Vec<Vec<u16>>,
     mean_x_min: u16,
     mean_x_max: u16,
     mean_y_min: u16,
@@ -29,9 +31,9 @@ impl Box {
 struct Led {
     box_idx: u16,
     relative_box_position: u16,
-    r: u16,
-    g: u16,
-    b: u16,
+    r: u8,
+    g: u8,
+    b: u8,
 }
 
 pub struct Screen {
@@ -119,6 +121,7 @@ fn new_box(
         r: 0,
         g: 0,
         b: 0,
+        sample_points: Vec::new(),
     }
 }
 
@@ -139,6 +142,20 @@ fn new_led(boxes: &Vec<Box>, led_pos: u16, side: u16) -> Led {
     }
 }
 
+fn set_regular_sampling_points(boxes: &mut Vec<Box>, sampling_size: u16) {
+    boxes.iter_mut()
+        .for_each(|b| {
+            (0..sampling_size)
+                .collect::<Vec<u16>>()
+                .iter()
+                .for_each(|_| {
+                    let px = rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max);
+                    let py = rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max);
+                    b.sample_points.push(vec![px, py]);
+                })
+        })
+}
+
 fn get_boxes(
     res_x: u16,
     res_y: u16,
@@ -146,6 +163,8 @@ fn get_boxes(
     y_box_cnt: u16,
     mean_depth: u16,
     mean_radius: u16,
+    sampling_size: u16,
+    random_sampling: bool
 ) -> Vec<Box> {
     let box_cnt: u16 = 2 * (x_box_cnt + y_box_cnt);
     let mut boxes = Vec::with_capacity(usize::from(box_cnt));
@@ -206,6 +225,10 @@ fn get_boxes(
         ));
     }
 
+    if !random_sampling {
+        set_regular_sampling_points(&mut boxes, sampling_size);
+    }
+
     return boxes;
 }
 
@@ -215,44 +238,57 @@ fn get_leds(
     y_led_count: u16,
     res_x: u16,
     res_y: u16,
+    led_groups_pop: u16
 ) -> Vec<Led> {
-    let mut leds = Vec::with_capacity(usize::from(2 * (x_led_count + y_led_count)));
+
+    let x_group_count: u16 = x_led_count / led_groups_pop;
+    let y_group_count: u16 = y_led_count / led_groups_pop;
+
+    let mut leds = Vec::with_capacity(usize::from(2 * (x_group_count + y_group_count)));
 
     //top leds
-    for idx in 0..x_led_count {
-        let led_pos: u16 = (res_x / x_led_count) * idx;
+    for idx in 0..x_group_count {
+        let led_pos: u16 = (res_x  / x_group_count) * idx;
         leds.push(new_led(&boxes, led_pos, 0));
     }
 
     //right leds
-    for idx in 0..y_led_count {
-        let led_pos: u16 = (res_y / y_led_count) * idx;
+    for idx in 0..y_group_count {
+        let led_pos: u16 = (res_y / y_group_count) * idx;
         leds.push(new_led(&boxes, led_pos, 1));
     }
 
     //bottom leds
-    for idx in (0..x_led_count).rev() {
-        let led_pos: u16 = (res_x / x_led_count) * idx;
+    for idx in (0..x_group_count).rev() {
+        let led_pos: u16 = (res_x / x_group_count) * idx;
         leds.push(new_led(&boxes, led_pos, 2));
     }
 
     //left leds
-    for idx in (0..y_led_count).rev() {
-        let led_pos: u16 = (res_y / y_led_count) * idx;
+    for idx in (0..y_group_count).rev() {
+        let led_pos: u16 = (res_y / y_group_count) * idx;
         leds.push(new_led(&boxes, led_pos, 3));
     }
 
     return leds;
 }
 
-fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16) {
+fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16, random_sampling: bool) {
     boxes.iter_mut().for_each(|b| {
         let mean_color: Vec<u16> = (0..sample_count)
             .collect::<Vec<u16>>()
             .iter()
-            .map(|_| {
-                let px = rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max);
-                let py = rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max);
+            .map(|&idx| {
+                let px;
+                let py;
+                if random_sampling {
+                    px = rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max);
+                    py = rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max);
+                } else {
+                    px = b.sample_points[usize::from(idx)][0];
+                    py = b.sample_points[usize::from(idx)][1];
+                }
+
                 let screen_capture = screen.capture_ximage(1, 1, px.into(), py.into());
                 let clr = &mut xlib::XColor {
                     pixel: unsafe { xlib::XGetPixel(screen_capture, 0, 0) },
@@ -290,7 +326,7 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16) {
 }
 
 impl Led {
-    fn update_color(&mut self, boxes: &Vec<Box>) {
+    fn update_color(&mut self, boxes: &Vec<Box>, luminosity: u16) {
         let boxes_last_idx: u16 = boxes.len() as u16 - 1;
         let current_box = &boxes[usize::from(self.box_idx)];
         let next_box = match current_box.side {
@@ -317,35 +353,71 @@ impl Led {
             }
         };
 
-        self.r = (relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100;
-        self.g = (relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100;
-        self.b = (relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100;
+        self.r = (luminosity * ((relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100) / 100) as u8;
+        self.g = (luminosity * ((relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100) / 100) as u8;
+        self.b = (luminosity * ((relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100) / 100) as u8;
     }
+}
+
+fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16) {
+    leds.iter_mut().for_each(|l| l.update_color(boxes, luminosity));
+}
+
+
+fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort) {
+    let mut values: Vec<u8> = Vec::new();
+    values.push(b'F');
+    values.push(b'u');
+
+    leds.iter()
+        .for_each(|l| {
+            values.push(TryInto::<u8>::try_into(l.r).unwrap());
+            values.push(TryInto::<u8>::try_into(l.g).unwrap());
+            values.push(TryInto::<u8>::try_into(l.b).unwrap());
+        }
+        );
+
+
+    //println!("{:?}", &values[..]);
+    port.write(&values[..]).expect("Serial write error");
 }
 
 fn main() {
     let x_res = 2560;
     let y_res = 1440;
+    let luminosity_percent = 20;
     let x_box_cnt = 9;
     let y_box_cnt = 5;
     let mean_radius = 150;
     let mean_depth = 300;
-    let x_led_count = 86;
-    let y_led_count = 35;
+    let x_led_count = 82;
+    let y_led_count = 47;
     let sampling_size = 12;
-    let loop_sleep = 100;
+    let random_sampling = false;
+    let loop_sleep = 60;
+    let led_groups_pop = 1;
 
-    let mut boxes = get_boxes(x_res, y_res, x_box_cnt, y_box_cnt, mean_depth, mean_radius);
-    let mut leds = get_leds(&boxes, x_led_count, y_led_count, x_res, y_res);
+    let mut boxes = get_boxes(x_res, y_res, x_box_cnt, y_box_cnt, mean_depth, mean_radius, sampling_size, random_sampling);
+    let mut leds = get_leds(&boxes, x_led_count, y_led_count, x_res, y_res, led_groups_pop);
 
     let screen = Screen::open().unwrap();
+    //let ports = serialport::available_ports().expect("No ports found!");
+    //for p in ports {
+    //    println!("{}", p.port_name);
+    //}
+
+    let mut port = serialport::new("/dev/ttyUSB0", 115_200).open_native().expect("Failed to open port");
+
+    println!{"Port open"};
 
     loop {
-        color_boxes(&mut boxes, &screen, sampling_size);
-        leds.iter_mut().for_each(|l| l.update_color(&boxes));
+        color_boxes(&mut boxes, &screen, sampling_size, random_sampling);
+        color_leds(&mut leds, &boxes, luminosity_percent);
+        write_to_serial(&leds, &mut port);
 
-        leds.iter()
-            .for_each(|b| println!("{} {} {}", b.r, b.g, b.b));
+        //println!("START\n");
+        //leds.iter()
+        //    .for_each(|b| println!("{} {} {} {}", b.r, b.g, b.b, &boxes[usize::try_from(b.box_idx).unwrap()].side));
 
         thread::sleep(time::Duration::from_millis(loop_sleep));
     }
