@@ -433,15 +433,12 @@ fn main() {
     let mean_depth = 300;
     let x_led_count = 82;
     let y_led_count = 47;
-    let sampling_size = 10; //number of pixel for mean color calculation per boxes. Increase it
-                            //will improve color accuracy at the cost of reactivity.
-    let random_sampling = false; //If set to true, will randomly select different pixels for each loop. Setting it to true will make the color vary even when screen is not changing, especially if sampling size is low.
-    let led_groups_pop = 1; //bugged feature for grouping leds. Keep it to 1.
-    let luminosity_fading = false; //bugged feature for fading luminosity to avoid abrupt changes.
-                                   //TODO fix it. Keep it to false otherwise.
+    let sampling_size = 10;
+    let random_sampling = false;
+    let led_groups_pop = 1;
+    let luminosity_fading = false;
     let luminosity_fading_speed = 30;
-    let loop_min_time = 30; //loop minimum time in millis(). Decreasing will increase reactivity
-                            //but increase cpu usage.
+    let loop_min_time = 30;
     
 
     let mut boxes = get_boxes(x_res, y_res, x_box_cnt, y_box_cnt, mean_depth, mean_radius, sampling_size, random_sampling);
