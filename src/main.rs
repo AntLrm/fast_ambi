@@ -364,26 +364,32 @@ fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16) {
 }
 
 
-fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort, led_groups_pop: u8) {
+fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort, led_groups_pop: u8, start_corner: u8, x_led_count: u16, y_led_count: u16) {
     let mut values: Vec<u8> = Vec::new();
     values.push(255); //255 means start of leds sequence
     values.push(253); //253 means that next byte is led_group_pop.
     values.push(led_groups_pop);
 
-    leds.iter()
-        .for_each(|l| {
+    let starting_led = match start_corner {
+        0 => 0,
+        1 => x_led_count,
+        2 => x_led_count + y_led_count,
+        3 => 2 * x_led_count + y_led_count,
+        _ => 0
+    };
+
+    for idx in 0..leds.len() {
             values.push(254); //254 means start of led 
-            values.push(std::cmp::min(TryInto::<u8>::try_into(l.r).unwrap(), 252)); //led color is
+            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + usize::from(starting_led)) % leds.len()].r).unwrap(), 252)); //led color is
                                                                                     //capped at 252
                                                                                     //to allow for
                                                                                     //253, 254, and
                                                                                     //255 values to
                                                                                     //    be
                                                                                     //    headers.
-            values.push(std::cmp::min(TryInto::<u8>::try_into(l.g).unwrap(), 252));
-            values.push(std::cmp::min(TryInto::<u8>::try_into(l.b).unwrap(), 252));
+            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + usize::from(starting_led)) % leds.len()].g).unwrap(), 252)); //led color is
+            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + usize::from(starting_led)) % leds.len()].b).unwrap(), 252)); //led color is
         }
-        );
 
 
     match port.write(&values[..]) {
@@ -402,6 +408,7 @@ fn main() {
     let y_res = 1440;
     let x_led_count = 82;
     let y_led_count = 47;
+    let start_corner = 0;
     let serial_port = "/dev/ttyUSB0";
 
     //preferences parameters
@@ -434,7 +441,7 @@ fn main() {
         let start = Instant::now();
         color_boxes(&mut boxes, &screen, sampling_size, random_sampling);
         color_leds(&mut leds, &boxes, luminosity_percent);
-        write_to_serial(&leds, &mut port, led_groups_pop);
+        write_to_serial(&leds, &mut port, led_groups_pop, start_corner, x_led_count, y_led_count);
         let duration = start.elapsed();
         thread::sleep(Duration::from_millis(loop_min_time).saturating_sub(duration));
     }

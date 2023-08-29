@@ -1,7 +1,12 @@
 # FAST-AMBI
 An ambilight implementation for Arduino controlled led strips and X11 desktops written in Rust.
 Ambilight setups are led strips around the back of a computer or a TV screen that reproduce colors displayed on the screen.
+
+img
+
+
 This implementation is inspired by Ambilight X11 project but with some tweaks to reduce delay between image displayed, and leds color update.
+
 The program works by computing leds color using X11 screen capture on specific pixels and sending color info through serial to an arduino that control the leds strips with FastLED library.
 
 # How it works
