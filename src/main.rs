@@ -1,10 +1,10 @@
 use rand::Rng;
+use std::time::{Duration, Instant};
 use std::cmp;
 use std::ptr;
 use std::thread;
-use std::time;
 use x11::xlib;
-use std::io::Write;
+use std::io::{self, Write};
 
 struct Box {
     section_start: u16,
@@ -326,7 +326,7 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16, random_
 }
 
 impl Led {
-    fn update_color(&mut self, boxes: &Vec<Box>, luminosity: u16) {
+    fn update_color(&mut self, boxes: &Vec<Box>, luminosity: u16, luminosity_fading: bool, luminosity_fading_speed: u16) {
         let boxes_last_idx: u16 = boxes.len() as u16 - 1;
         let current_box = &boxes[usize::from(self.box_idx)];
         let next_box = match current_box.side {
@@ -353,80 +353,113 @@ impl Led {
             }
         };
 
-        self.r = (luminosity * ((relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100) / 100) as u8;
-        self.g = (luminosity * ((relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100) / 100) as u8;
-        self.b = (luminosity * ((relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100) / 100) as u8;
+        let mut luminosity_fading_factor = 100;
+        let target_r = luminosity * ((relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100) / 100;
+        let target_g = luminosity * ((relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100) / 100;
+        let target_b = luminosity * ((relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100) / 100;
+
+        if luminosity_fading {
+            let current_luminosity: u16 = (self.r as u16 + self.g as u16 + self.b as u16) / 3;
+            let target_luminosity: u16 = (target_r + target_g + target_b) / 3;
+            let diff_lum: i32 = target_luminosity as i32 - current_luminosity as i32;
+            luminosity_fading_factor = match target_luminosity {
+                0 => 0,
+                _ => cmp::max(
+                0,
+
+                (       
+                    (
+                        (current_luminosity * 100) as i32 +
+                        100 * (diff_lum).signum() * (cmp::min(luminosity_fading_speed, target_luminosity.abs_diff(current_luminosity))) as i32
+                    ) as u32
+                ) / target_luminosity as u32
+
+            )};
+            if diff_lum > 40 {
+            println!("---");
+            println!("{} {} {}", self.r, self.g, self.b);
+            println!("{}", current_luminosity);
+            println!("{} {} {}", target_r, target_g, target_b);
+            println!("{}", target_luminosity);
+            println!("{} {}", (diff_lum).signum(), (target_luminosity.abs_diff(current_luminosity)));
+            println!("{}", luminosity_fading_factor);
+            }
+        };
+
+        self.r = (luminosity_fading_factor * target_r as u32 /100) as u8;
+        self.g = (luminosity_fading_factor * target_g as u32 /100) as u8;
+        self.b = (luminosity_fading_factor * target_b as u32 /100) as u8;
     }
 }
 
-fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16) {
-    leds.iter_mut().for_each(|l| l.update_color(boxes, luminosity));
+fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16, luminosity_fading: bool, luminosity_fading_speed: u16) {
+    leds.iter_mut().for_each(|l| l.update_color(boxes, luminosity, luminosity_fading, luminosity_fading_speed));
 }
 
 
 fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort) {
     let mut values: Vec<u8> = Vec::new();
-    values.push(b'F');
-    values.push(b'u');
+    //values.push(b'u');
+    values.push(255);
 
     leds.iter()
         .for_each(|l| {
-            values.push(TryInto::<u8>::try_into(l.r).unwrap());
-            values.push(TryInto::<u8>::try_into(l.g).unwrap());
-            values.push(TryInto::<u8>::try_into(l.b).unwrap());
+            values.push(254);
+            values.push(std::cmp::min(TryInto::<u8>::try_into(l.r).unwrap(), 253));
+            values.push(std::cmp::min(TryInto::<u8>::try_into(l.g).unwrap(), 253));
+            values.push(std::cmp::min(TryInto::<u8>::try_into(l.b).unwrap(), 253));
         }
         );
 
 
     //println!("{:?}", &values[..]);
-    port.write(&values[..]).expect("Serial write error");
+    match port.write(&values[..]) {
+        Ok(_) => {
+            //print!("{}", &string);
+            std::io::stdout().flush().unwrap();
+        }
+        Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
+        Err(e) => eprintln!("{:?}", e),
+    }
 }
 
 fn main() {
     let x_res = 2560;
     let y_res = 1440;
     let luminosity_percent = 20;
-    let x_box_cnt = 9;
-    let y_box_cnt = 5;
+    let x_box_cnt = 8;
+    let y_box_cnt = 4;
     let mean_radius = 150;
     let mean_depth = 300;
     let x_led_count = 82;
     let y_led_count = 47;
-    let sampling_size = 12;
-    let random_sampling = false;
-    let loop_sleep = 60;
-    let led_groups_pop = 1;
+    let sampling_size = 10; //number of pixel for mean color calculation per boxes. Increase it
+                            //will improve color accuracy at the cost of reactivity.
+    let random_sampling = false; //If set to true, will randomly select different pixels for each loop. Setting it to true will make the color vary even when screen is not changing, especially if sampling size is low.
+    let led_groups_pop = 1; //bugged feature for grouping leds. Keep it to 1.
+    let luminosity_fading = false; //bugged feature for fading luminosity to avoid abrupt changes.
+                                   //TODO fix it. Keep it to false otherwise.
+    let luminosity_fading_speed = 30;
+    let loop_min_time = 30; //loop minimum time in millis(). Decreasing will increase reactivity
+                            //but increase cpu usage.
+    
 
     let mut boxes = get_boxes(x_res, y_res, x_box_cnt, y_box_cnt, mean_depth, mean_radius, sampling_size, random_sampling);
     let mut leds = get_leds(&boxes, x_led_count, y_led_count, x_res, y_res, led_groups_pop);
 
     let screen = Screen::open().unwrap();
-    //let ports = serialport::available_ports().expect("No ports found!");
-    //for p in ports {
-    //    println!("{}", p.port_name);
-    //}
 
-    let mut port = serialport::new("/dev/ttyUSB0", 115_200).open_native().expect("Failed to open port");
+    let mut port = serialport::new("/dev/ttyUSB0", 576_000)
+        .open_native().expect("Failed to open port");
 
     println!{"Port open"};
 
     loop {
+        let start = Instant::now();
         color_boxes(&mut boxes, &screen, sampling_size, random_sampling);
-        color_leds(&mut leds, &boxes, luminosity_percent);
+        color_leds(&mut leds, &boxes, luminosity_percent, luminosity_fading, luminosity_fading_speed);
         write_to_serial(&leds, &mut port);
-
-        //println!("START\n");
-        //leds.iter()
-        //    .for_each(|b| println!("{} {} {} {}", b.r, b.g, b.b, &boxes[usize::try_from(b.box_idx).unwrap()].side));
-
-        thread::sleep(time::Duration::from_millis(loop_sleep));
+        let duration = start.elapsed();
+        thread::sleep(Duration::from_millis(loop_min_time).saturating_sub(duration));
     }
-    /*
-    boxes.iter()
-        .for_each(|b| {println!("{} {} {} {} {} {} {}", b.section_start, b.section_end, b.mean_x_min, b.mean_y_min, b.mean_x_max, b.mean_y_max, b.side)});
-    boxes.iter()
-        .for_each(|b| {println!("{} {} {}", b.r, b.g, b.b)});
-    leds.iter()
-        .for_each(|l| {println!("{} {}", l.box_idx, l.relative_box_position)});
-    */
 }
