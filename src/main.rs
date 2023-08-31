@@ -324,7 +324,7 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16, random_
 }
 
 impl Led {
-    fn update_color(&mut self, boxes: &Vec<Box>, luminosity: u16) {
+    fn update_color(&mut self, boxes: &Vec<Box>, luminosity: u16, color_correction_red: u16, color_correction_green: u16, color_correction_blue: u16) {
         let boxes_last_idx: u16 = boxes.len() as u16 - 1;
         let current_box = &boxes[usize::from(self.box_idx)];
         let next_box = match current_box.side {
@@ -351,14 +351,14 @@ impl Led {
             }
         };
 
-        self.r = (luminosity * ((relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100) / 100) as u8;
-        self.g = (luminosity * ((relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100) / 100) as u8;
-        self.b = (luminosity * ((relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100) / 100) as u8;
+        self.r = (color_correction_red   * (luminosity * ((relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100) / 100) /100) as u8;
+        self.g = (color_correction_green * (luminosity * ((relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100) / 100) /100) as u8;
+        self.b = (color_correction_blue  * (luminosity * ((relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100) / 100) /100) as u8;
     }
 }
 
-fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16) {
-    leds.iter_mut().for_each(|l| l.update_color(boxes, luminosity));
+fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16, color_correction_red: u16, color_correction_green: u16, color_correction_blue: u16) {
+    leds.iter_mut().for_each(|l| l.update_color(boxes, luminosity, color_correction_red, color_correction_green, color_correction_blue));
 }
 
 
@@ -413,6 +413,10 @@ fn main() {
     let mean_width= 300;
     let mean_depth = 200;
     let random_sampling = false;
+    let color_correction_red = 120;
+    let color_correction_green = 100;
+    let color_correction_blue = 100;
+
 
 
     //performance parameters
@@ -435,7 +439,7 @@ fn main() {
     loop {
         let start = Instant::now();
         color_boxes(&mut boxes, &screen, sampling_size, random_sampling);
-        color_leds(&mut leds, &boxes, luminosity_percent);
+        color_leds(&mut leds, &boxes, luminosity_percent, color_correction_red, color_correction_green, color_correction_blue);
         write_to_serial(&leds, &mut port, start_corner, x_led_count, y_led_count);
         let duration = start.elapsed();
         thread::sleep(Duration::from_millis(loop_min_time).saturating_sub(duration));
