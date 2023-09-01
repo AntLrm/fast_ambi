@@ -6,57 +6,162 @@ use std::thread;
 use x11::xlib;
 use std::io::{self, Write};
 
-
-struct Box {
-    section_start: u16,
-    section_end: u16,
-    side: u16, //0 top, 1 right, 2 bottom, 3 left
-    sample_points : Vec<Vec<u16>>,
-    mean_x_min: u16,
-    mean_x_max: u16,
-    mean_y_min: u16,
-    mean_y_max: u16,
-    r: u16,
-    g: u16,
-    b: u16,
+#[derive(Debug)]
+enum ScreenSide {
+    Top,
+    Right,
+    Bottom,
+    Left
 }
 
-impl Box {
-    fn set_color(&mut self, r: u16, g: u16, b: u16) {
-        self.r = r;
-        self.b = g;
-        self.g = b;
+impl ScreenSide {
+    fn get_offset(&self, screen: &Screen) -> u32 {
+        match self {
+            ScreenSide::Top     => 0,
+            ScreenSide::Right   => screen.x_res,
+            ScreenSide::Bottom  => screen.x_res + screen.y_res,
+            ScreenSide::Left    => 2 * screen.x_res + screen.y_res
+        }
+    }
+
+    fn get_side_res(&self, screen: &Screen) -> u32 {
+        match self {
+            ScreenSide::Top | ScreenSide::Bottom    => screen.x_res,
+            ScreenSide::Right | ScreenSide::Left    => screen.y_res,
+        }
+    }
+
+    fn get_linear_from_border_coord(&self, screen: &Screen, border_coord: u32) -> u32 {
+        match self {
+            ScreenSide::Top | ScreenSide::Right     =>  self.get_offset(screen) + border_coord,
+            ScreenSide::Bottom | ScreenSide::Left   =>  self.get_offset(screen) + self.get_side_res(screen) - border_coord - 1,
+        }
     }
 }
 
-struct Led {
-    box_idx: u16,
-    relative_box_position: u16,
+
+#[derive(Debug)]
+struct CRGB {
     r: u8,
     g: u8,
-    b: u8,
+    b: u8
+}
+
+
+#[derive(Debug)]
+struct ScreenCoord {
+    x: u32,
+    y: u32,
+}
+
+
+impl ScreenCoord {
+    fn convert_to_linear_coord(&self, side: &ScreenSide, screen: &Screen) -> u32 {
+        match side {
+            ScreenSide::Top | ScreenSide::Bottom    => side.get_linear_from_border_coord(screen, self.x),
+            ScreenSide::Right | ScreenSide::Left    => side.get_linear_from_border_coord(screen, self.y),
+        }
+    }
+}
+
+fn get_random_sampling(b: &Box) -> ScreenCoord {
+    ScreenCoord {
+        x: rand::thread_rng().gen_range(b.screen_start.x..b.screen_end.x),
+        y: rand::thread_rng().gen_range(b.screen_start.y..b.screen_end.y),
+    }
+}
+
+fn get_side_from_linear(linear: u32, screen: &Screen) -> ScreenSide {
+    if      linear < ScreenSide::Right.get_offset(screen) {
+        return ScreenSide::Top;
+    }
+    else if linear < ScreenSide::Bottom.get_offset(screen) {
+        return ScreenSide::Right;
+    }
+    else if linear < ScreenSide::Left.get_offset(screen) {
+        return ScreenSide::Bottom;
+    }
+    else {
+        return ScreenSide::Left;
+    }
+
+}
+
+fn convert_linear_coord_to_screen_coord(linear: u32, screen: &Screen, depth: u32) -> ScreenCoord {
+    let current_side = get_side_from_linear(linear, screen);
+
+    let x = match current_side {
+            ScreenSide::Top     => linear,
+            ScreenSide::Right   => screen.x_res - 1 - depth,
+            ScreenSide::Bottom  => screen.x_res - (linear - current_side.get_offset(screen)) - 1,
+            ScreenSide::Left    => depth
+        };
+
+        let y = match current_side {
+            ScreenSide::Top     => depth,
+            ScreenSide::Right   => linear - current_side.get_offset(screen),
+            ScreenSide::Bottom  => screen.y_res - 1 - depth,
+            ScreenSide::Left    => screen.y_res - (linear - current_side.get_offset(screen)) - 1,
+        };
+
+        ScreenCoord {
+            x,
+            y
+        }
+}
+
+#[derive(Debug)]
+struct Box {
+    screen_start: ScreenCoord,
+    screen_end: ScreenCoord,
+    sample_points : Vec<ScreenCoord>,
+    color: CRGB,
+    side: ScreenSide,
+}
+
+struct Led {
+    box_idx: usize,
+    linear_position: u32,
+    color: CRGB,
+}
+
+impl Box {
+    fn set_color_from_rgb_vec(&mut self, color_vec: Vec<u32>) {
+        self.color = CRGB {
+            r: color_vec[0] as u8,
+            g: color_vec[1] as u8,
+            b: color_vec[2] as u8,
+        }
+    }
+
+    fn get_linear_coord(&self, screen: &Screen) -> (u32, u32) {
+        let box_linear_start = self.screen_start.convert_to_linear_coord(&self.side, screen);
+        let box_linear_end = self.screen_end.convert_to_linear_coord(&self.side, screen);
+        (cmp::min(box_linear_start, box_linear_end),  cmp::max(box_linear_start, box_linear_end))
+    }
 }
 
 pub struct Screen {
     display: *mut xlib::Display,
     window: xlib::Window,
+    x_res: u32,
+    y_res: u32
 }
 
 impl Screen {
-    /// Tries to open the X11 display, then returns a handle to the default screen.
-    ///
-    /// Returns `None` if the display could not be opened.
     pub fn open() -> Option<Screen> {
         unsafe {
             let display = xlib::XOpenDisplay(ptr::null());
             if display.is_null() {
                 return None;
             }
-            let screen = xlib::XDefaultScreenOfDisplay(display);
+            let screen= xlib::XDefaultScreenOfDisplay(display);
             let root = xlib::XRootWindowOfScreen(screen);
             Some(Screen {
                 display,
                 window: root,
+                x_res:  (*screen).width as u32,
+                y_res:  (*screen).height as u32,
             })
         }
     }
@@ -76,114 +181,110 @@ impl Drop for Screen {
     }
 }
 
+
+fn switch_corners(corner_1: ScreenCoord, corner_2: ScreenCoord) -> (ScreenCoord, ScreenCoord) {
+    (ScreenCoord {
+        x: cmp::min(corner_1.x, corner_2.x),
+        y: cmp::min(corner_1.y, corner_2.y),
+    },
+    ScreenCoord {
+        x: cmp::max(corner_1.x, corner_2.x),
+        y: cmp::max(corner_1.y, corner_2.y),
+    })
+}
+
 fn new_box(
-    idx: u16,
-    width: u16,
-    side: u16,
-    mean_radius: u16,
-    mean_depth: u16,
-    res_in_dir: u16,
-    res_ortho: u16,
+    idx: u32,
+    box_cnt: u32,
+    linear_width: u32,
+    side: ScreenSide,
+    box_screen_depth: u32,
+    screen: &Screen
 ) -> Box {
-    let section_center: u16 = (idx * width) + width / 2;
-    let in_dir_mean_min = (u16::MIN + section_center)
-        .checked_sub(mean_radius)
-        .unwrap_or(0);
-    let in_dir_mean_max = cmp::min(section_center + mean_radius, res_in_dir);
+    
+    let linear_start = side.get_offset(screen) + (idx * linear_width);
+
+    let linear_end      = match idx.cmp(&(box_cnt - 1)) {
+        cmp::Ordering::Equal    => Ok(side.get_side_res(screen) + side.get_offset(screen)  -  1),
+        cmp::Ordering::Less     => Ok(side.get_offset(screen)   + (idx + 1) * linear_width -  1),
+        cmp::Ordering::Greater  => Err("idx more than box cnt"),
+        }.unwrap();
+
+    let screen_start = convert_linear_coord_to_screen_coord(linear_start, screen, 0);
+    let screen_end = convert_linear_coord_to_screen_coord(linear_end, screen, box_screen_depth);
+    let (screen_start, screen_end) = switch_corners(screen_start, screen_end);
 
     Box {
-        section_start: idx * width,
-        section_end: (idx + 1) * width - 1,
-        side,
-        mean_x_min: match side {
-            0 | 2 => in_dir_mean_min,
-            1 => res_ortho - mean_depth - 1,
-            3 => 0,
-            _ => 0,
-        },
-        mean_x_max: match side {
-            0 | 2 => in_dir_mean_max,
-            1 => res_ortho - 1,
-            3 => mean_depth - 1,
-            _ => 0,
-        },
-        mean_y_min: match side {
-            0 => 0,
-            2 => res_ortho - mean_depth - 1,
-            1 | 3 => in_dir_mean_min,
-            _ => 0,
-        },
-        mean_y_max: match side {
-            0 => mean_depth - 1,
-            2 => res_ortho - 1,
-            1 | 3 => in_dir_mean_max,
-            _ => 0,
-        },
-        r: 0,
-        g: 0,
-        b: 0,
+        screen_start,
+        screen_end,
         sample_points: Vec::new(),
+        color: CRGB { r: 0, g: 0, b: 0, },
+        side,
     }
 }
 
-fn new_led(boxes: &Vec<Box>, led_pos: u16, side: u16) -> Led {
-    let (idx, bx) = boxes
+
+fn new_led(boxes: &Vec<Box>, linear_position: u32, screen: &Screen) -> Led {
+
+    let (idx, _) = boxes
         .iter()
         .enumerate()
-        .find(|(_, b)| b.section_start <= led_pos && b.section_end >= led_pos && b.side == side)
+        .find(|(_, b)| b.get_linear_coord(screen).0 <= linear_position && b.get_linear_coord(screen).1 >= linear_position)
         .unwrap();
 
     Led {
-        box_idx: idx as u16,
-        relative_box_position: (led_pos - bx.section_start) * 100
-            / (bx.section_end - bx.section_start),
+        box_idx: idx,
+        linear_position,
+        color: CRGB {
         r: 0,
         g: 0,
         b: 0,
+        }
     }
 }
 
-fn set_regular_sampling_points(boxes: &mut Vec<Box>, sampling_size: u16) {
+fn set_regular_sampling_points(boxes: &mut Vec<Box>, sampling_size: u32) {
     boxes.iter_mut()
         .for_each(|b| {
             (0..sampling_size)
-                .collect::<Vec<u16>>()
+                .collect::<Vec<u32>>()
                 .iter()
                 .for_each(|_| {
-                    let px = rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max);
-                    let py = rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max);
-                    b.sample_points.push(vec![px, py]);
+                    b.sample_points.push(get_random_sampling(b));
                 })
         })
 }
 
+
+
 fn get_boxes(
-    res_x: u16,
-    res_y: u16,
-    x_box_cnt: u16,
-    y_box_cnt: u16,
-    mean_depth: u16,
-    mean_radius: u16,
-    sampling_size: u16,
+    screen: &Screen,
+    x_box_cnt: u32,
+    y_box_cnt: u32,
+    boxes_linear_depth: u32,
+    sampling_size: u32,
     random_sampling: bool
 ) -> Vec<Box> {
-    let box_cnt: u16 = 2 * (x_box_cnt + y_box_cnt);
-    let mut boxes = Vec::with_capacity(usize::from(box_cnt));
-    let x_width: u16;
-    let y_width: u16;
-    x_width = res_x / x_box_cnt;
-    y_width = res_y / y_box_cnt;
+    let box_cnt: usize = 2 * (x_box_cnt as usize + y_box_cnt as usize);
+    let mut boxes = Vec::with_capacity(box_cnt);
+    let x_width: u32;
+    let y_width: u32;
+    
+    x_width = screen.x_res / x_box_cnt;
+    y_width = screen.y_res / y_box_cnt;
+
+    let x_width = x_width;
+    let y_width = y_width;
 
     //top boxes
     for idx in 0..x_box_cnt {
         boxes.push(new_box(
             idx,
+            x_box_cnt,
             x_width,
-            0,
-            mean_radius,
-            mean_depth,
-            res_x,
-            res_y,
+            ScreenSide::Top,
+            boxes_linear_depth,
+            screen
         ));
     }
 
@@ -191,38 +292,35 @@ fn get_boxes(
     for idx in 0..y_box_cnt {
         boxes.push(new_box(
             idx,
+            y_box_cnt,
             y_width,
-            1,
-            mean_radius,
-            mean_depth,
-            res_y,
-            res_x,
+            ScreenSide::Right,
+            boxes_linear_depth,
+            screen
         ));
     }
 
     //bottom boxes
-    for idx in (0..x_box_cnt).rev() {
+    for idx in 0..x_box_cnt {
         boxes.push(new_box(
             idx,
+            x_box_cnt,
             x_width,
-            2,
-            mean_radius,
-            mean_depth,
-            res_x,
-            res_y,
+            ScreenSide::Bottom,
+            boxes_linear_depth,
+            screen
         ));
     }
 
     //left boxes
-    for idx in (0..y_box_cnt).rev() {
+    for idx in 0..y_box_cnt {
         boxes.push(new_box(
             idx,
+            y_box_cnt,
             y_width,
-            3,
-            mean_radius,
-            mean_depth,
-            res_y,
-            res_x,
+            ScreenSide::Left,
+            boxes_linear_depth,
+            screen
         ));
     }
 
@@ -235,59 +333,62 @@ fn get_boxes(
 
 fn get_leds(
     boxes: &Vec<Box>,
-    x_led_count: u16,
-    y_led_count: u16,
-    res_x: u16,
-    res_y: u16
+    x_led_count: u32,
+    y_led_count: u32,
+    screen: &Screen
 ) -> Vec<Led> {
 
 
-    let mut leds = Vec::with_capacity(usize::from(2 * (x_led_count + y_led_count)));
+    let mut leds = Vec::with_capacity(2 * (x_led_count + y_led_count) as usize);
 
     //top leds
     for idx in 0..x_led_count {
-        let led_pos: u16 = (res_x  / x_led_count) * idx;
-        leds.push(new_led(&boxes, led_pos, 0));
+        let led_pos_on_border: u32 = (screen.x_res  / x_led_count) * idx;
+        let led_linear_pos = ScreenSide::Top.get_linear_from_border_coord(screen, led_pos_on_border);
+        leds.push(new_led(&boxes, led_linear_pos, screen));
     }
 
     //right leds
     for idx in 0..y_led_count {
-        let led_pos: u16 = (res_y / y_led_count) * idx;
-        leds.push(new_led(&boxes, led_pos, 1));
+        let led_pos_on_border: u32 = (screen.y_res / y_led_count) * idx;
+        let led_linear_pos = ScreenSide::Right.get_linear_from_border_coord(screen, led_pos_on_border);
+        leds.push(new_led(&boxes, led_linear_pos, screen));
     }
 
     //bottom leds
     for idx in (0..x_led_count).rev() {
-        let led_pos: u16 = (res_x / x_led_count) * idx;
-        leds.push(new_led(&boxes, led_pos, 2));
+        let led_pos_on_border: u32 = (screen.x_res / x_led_count) * idx;
+        let led_linear_pos = ScreenSide::Bottom.get_linear_from_border_coord(screen, led_pos_on_border);
+        leds.push(new_led(&boxes, led_linear_pos, screen));
     }
 
     //left leds
     for idx in (0..y_led_count).rev() {
-        let led_pos: u16 = (res_y / y_led_count) * idx;
-        leds.push(new_led(&boxes, led_pos, 3));
+        let led_pos_on_border: u32 = (screen.y_res / y_led_count) * idx;
+        let led_linear_pos = ScreenSide::Left.get_linear_from_border_coord(screen, led_pos_on_border);
+        leds.push(new_led(&boxes, led_linear_pos, screen));
     }
 
     return leds;
 }
 
-fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16, random_sampling: bool) {
+fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u32, random_sampling: bool) {
     boxes.iter_mut().for_each(|b| {
-        let mean_color: Vec<u16> = (0..sample_count)
-            .collect::<Vec<u16>>()
+        let mean_color: Vec<u32> = (0..sample_count)
+            .collect::<Vec<u32>>()
             .iter()
             .map(|&idx| {
-                let px;
-                let py;
+                let sampling_pixel;
                 if random_sampling {
-                    px = rand::thread_rng().gen_range(b.mean_x_min..b.mean_x_max);
-                    py = rand::thread_rng().gen_range(b.mean_y_min..b.mean_y_max);
+                    sampling_pixel = get_random_sampling(b);
                 } else {
-                    px = b.sample_points[usize::from(idx)][0];
-                    py = b.sample_points[usize::from(idx)][1];
+                    sampling_pixel = ScreenCoord {
+                        x: b.sample_points[idx as usize].x,
+                        y: b.sample_points[idx as usize].y,
+                    }
                 }
 
-                let screen_capture = screen.capture_ximage(1, 1, px.into(), py.into());
+                let screen_capture = screen.capture_ximage(1, 1, sampling_pixel.x as i32, sampling_pixel.y as i32);
                 let clr = &mut xlib::XColor {
                     pixel: unsafe { xlib::XGetPixel(screen_capture, 0, 0) },
                     red: 0,
@@ -311,7 +412,7 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16, random_
 
                 return [clr.red / 256, clr.green / 256, clr.blue / 256];
             })
-            .map(|c| [c[0] as u16, c[1] as u16, c[2] as u16])
+            .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
             .fold([0, 0, 0], |[rs, gs, bs], [r, g, b]| {
                 [rs + r, gs + g, bs + b]
             })
@@ -319,50 +420,38 @@ fn color_boxes(boxes: &mut Vec<Box>, screen: &Screen, sample_count: u16, random_
             .map(|c| c / sample_count)
             .collect();
 
-        b.set_color(mean_color[0], mean_color[1], mean_color[2]);
+        b.set_color_from_rgb_vec(mean_color);
     });
 }
 
 impl Led {
-    fn update_color(&mut self, boxes: &Vec<Box>, luminosity: u16, color_correction_red: u16, color_correction_green: u16, color_correction_blue: u16) {
-        let boxes_last_idx: u16 = boxes.len() as u16 - 1;
+    fn update_color(&mut self, boxes: &Vec<Box>, screen: &Screen, luminosity: u32, color_correction_red: u32, color_correction_green: u32, color_correction_blue: u32) {
+        let boxes_last_idx= boxes.len() - 1;
         let current_box = &boxes[usize::from(self.box_idx)];
-        let next_box = match current_box.side {
-            0 | 1 => &boxes[usize::from(self.box_idx) + 1],
-            2 | 3 => &boxes[usize::from(self.box_idx) - 1],
-            _ => &boxes[0],
-        };
-        let previous_box = match current_box.side {
-            0 | 1 => match self.box_idx {
-                0 => &boxes[usize::from(boxes_last_idx)],
-                _ => &boxes[usize::from(self.box_idx) + 1],
-            },
-            2 | 3 => match self.box_idx {
-                a if a == boxes_last_idx => &boxes[0],
-                _ => &boxes[usize::from(self.box_idx) - 1],
-            },
-            _ => &boxes[0],
+        let next_box = &boxes[(self.box_idx + 1) % boxes.len()];
+        let previous_box = &boxes[self.box_idx.checked_sub(1).unwrap_or(boxes_last_idx)];
+        let current_box_linear = current_box.get_linear_coord(screen);
+        let current_box_center = current_box_linear.0 + (current_box_linear.1 - current_box_linear.0) / 2;
+
+        let (b1, b2, relative_unit) = match self.linear_position.cmp(&current_box_center) {
+            cmp::Ordering::Less                             => (previous_box, current_box, 100 * (self.linear_position - current_box_linear.0)  / (current_box_center - current_box_linear.0)),
+            cmp::Ordering::Greater | cmp::Ordering::Equal   => (current_box, next_box, 100 * (self.linear_position - current_box_center)  / (current_box_linear.1 - current_box_center)),
         };
 
-        let (b1, b2, relative_unit) = match self.relative_box_position.cmp(&50) {
-            cmp::Ordering::Less => (previous_box, current_box, self.relative_box_position * 2),
-            cmp::Ordering::Greater | cmp::Ordering::Equal => {
-                (current_box, next_box, (self.relative_box_position - 50) * 2)
-            }
+        self.color = CRGB {
+            r: (luminosity * (color_correction_red   * ((relative_unit * b2.color.r as u32 + (100 - relative_unit) * b1.color.r as u32) / 100) /100) /100) as u8,
+            g: (luminosity * (color_correction_green   * ((relative_unit * b2.color.g as u32 + (100 - relative_unit) * b1.color.g as u32) / 100) /100) /100) as u8,
+            b: (luminosity * (color_correction_blue   * ((relative_unit * b2.color.b as u32 + (100 - relative_unit) * b1.color.b as u32) / 100) /100) /100) as u8,
         };
-
-        self.r = (color_correction_red   * (luminosity * ((relative_unit * b2.r + (100 - relative_unit) * b1.r) / 100) / 100) /100) as u8;
-        self.g = (color_correction_green * (luminosity * ((relative_unit * b2.g + (100 - relative_unit) * b1.g) / 100) / 100) /100) as u8;
-        self.b = (color_correction_blue  * (luminosity * ((relative_unit * b2.b + (100 - relative_unit) * b1.b) / 100) / 100) /100) as u8;
     }
 }
 
-fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, luminosity: u16, color_correction_red: u16, color_correction_green: u16, color_correction_blue: u16) {
-    leds.iter_mut().for_each(|l| l.update_color(boxes, luminosity, color_correction_red, color_correction_green, color_correction_blue));
+fn color_leds(leds: &mut Vec<Led>, boxes: &Vec<Box>, screen: &Screen, luminosity: u32, color_correction_red: u32, color_correction_green: u32, color_correction_blue: u32) {
+    leds.iter_mut().for_each(|l| l.update_color(boxes, screen, luminosity, color_correction_red, color_correction_green, color_correction_blue));
 }
 
 
-fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort, start_corner: u8, x_led_count: u16, y_led_count: u16) {
+fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort, start_corner: u8, x_led_count: u32, y_led_count: u32) {
     let mut values: Vec<u8> = Vec::new();
     values.push(255); //255 means start of leds sequence
 
@@ -378,15 +467,15 @@ fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort, start_corner
     
     for idx in 0..leds.len() {
             values.push(254); //254 means start of led 
-            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + usize::from(starting_led)) % leds.len()].r).unwrap(), 252)); //led color is
+            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + starting_led as usize) % leds.len()].color.r).unwrap(), 252)); //led color is
                                                                                     //capped at 252
                                                                                     //to allow for
                                                                                     //253, 254, and
                                                                                     //255 values to
                                                                                     //    be
                                                                                     //    headers.
-            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + usize::from(starting_led)) % leds.len()].g).unwrap(), 252)); //led color is
-            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + usize::from(starting_led)) % leds.len()].b).unwrap(), 252)); //led color is
+            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + starting_led as usize) % leds.len()].color.g).unwrap(), 252)); //led color is
+            values.push(std::cmp::min(TryInto::<u8>::try_into(leds[(idx + starting_led as usize) % leds.len()].color.b).unwrap(), 252)); //led color is
         }
 
 
@@ -401,8 +490,6 @@ fn write_to_serial(leds: &Vec<Led>, port: &mut serialport::TTYPort, start_corner
 
 fn main() {
     //hardware parameters
-    let x_res = 2560;
-    let y_res = 1440;
     let x_led_count = 82;
     let y_led_count = 47;
     let start_corner = 0;
@@ -410,28 +497,24 @@ fn main() {
 
     //preferences parameters
     let luminosity_percent = 20;
-    let mean_width= 300;
-    let mean_depth = 200;
+    let border_depth = 200; 
     let random_sampling = false;
     let color_correction_red = 120;
     let color_correction_green = 100;
     let color_correction_blue = 100;
 
 
-
     //performance parameters
-    let x_box_cnt = 8;
-    let y_box_cnt = 4;
-    let sampling_size = 12;
+    let x_box_cnt = 9;
+    let y_box_cnt = 5;
+    let sampling_size = 10;
     let loop_min_time = 30;
     let baud_rate = 576_000;
 
-
-    let mut boxes = get_boxes(x_res, y_res, x_box_cnt, y_box_cnt, mean_depth, mean_width / 2, sampling_size, random_sampling);
-    let mut leds = get_leds(&boxes, x_led_count, y_led_count, x_res, y_res);
-
     let screen = Screen::open().unwrap();
 
+    let mut boxes = get_boxes(&screen, x_box_cnt, y_box_cnt, border_depth, sampling_size, random_sampling);
+    let mut leds = get_leds(&boxes, x_led_count, y_led_count, &screen);
     let mut port = serialport::new(serial_port, baud_rate)
         .open_native().expect("Failed to open port");
 
@@ -439,7 +522,7 @@ fn main() {
     loop {
         let start = Instant::now();
         color_boxes(&mut boxes, &screen, sampling_size, random_sampling);
-        color_leds(&mut leds, &boxes, luminosity_percent, color_correction_red, color_correction_green, color_correction_blue);
+        color_leds(&mut leds, &boxes, &screen, luminosity_percent, color_correction_red, color_correction_green, color_correction_blue);
         write_to_serial(&leds, &mut port, start_corner, x_led_count, y_led_count);
         let duration = start.elapsed();
         thread::sleep(Duration::from_millis(loop_min_time).saturating_sub(duration));

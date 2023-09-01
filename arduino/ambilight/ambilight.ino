@@ -76,8 +76,8 @@ void loop() {
       }
       
     
-      bt = readserial();
-      if (bt == 255) {
+      gt = readserial();
+      if (gt == 255) {
         at_start = true;
         return;
       } else if (timeout) {
@@ -85,8 +85,8 @@ void loop() {
         return;
       }
     
-      gt = readserial();
-      if (gt == 255) {
+      bt = readserial();
+      if (bt == 255) {
         at_start = true;
         return;
       } else if (timeout) {
