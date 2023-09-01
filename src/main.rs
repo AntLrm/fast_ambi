@@ -521,6 +521,12 @@ fn write_to_serial(
         _ => 0,
     };
 
+    //level shifter led on controller board.
+    values.push(254);
+    values.push(0);
+    values.push(0);
+    values.push(0);
+
     for idx in 0..leds.len() {
         values.push(254); //254 means start of led
         values.push(std::cmp::min(

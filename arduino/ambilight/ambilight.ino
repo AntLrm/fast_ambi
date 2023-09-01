@@ -1,5 +1,5 @@
 #include <FastLED.h>
-#define NUM_LEDS 258
+#define NUM_LEDS 259
 #define DATA_PIN 2
 #define TIMEOUT 1000
 
